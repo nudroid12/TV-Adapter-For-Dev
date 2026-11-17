@@ -1,10 +1,12 @@
 package com.tvlink.tv;
 
+import com.nudroidlabs.tvadapter.TvAdapter;
 import com.tvlink.ui.R;
 
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.widget.EditText;
 import android.widget.ScrollView;
 import android.widget.Toast;
@@ -23,12 +25,17 @@ public class MainActivity extends Activity {
     private static final int FOCUS_FILL = Color.WHITE;
     private static final int FOCUS_BLUE = 0xff7fb1fe;
 
+    private boolean phonePreview;
     private boolean showingHome;
     private boolean showingAbout;
 
     @Override public void onCreate(Bundle state) {
         setTheme(R.style.TVLinkTelevisionTheme);
         super.onCreate(state);
+        phonePreview = !TvAdapter.isTelevision(this);
+        if (phonePreview) {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+        }
         getPreferences(MODE_PRIVATE).registerOnSharedPreferenceChangeListener(deviceListener);
         home();
     }
@@ -56,7 +63,11 @@ public class MainActivity extends Activity {
         deviceCard = null;
         storageRoot = null;
         storageFolder = null;
-        setContentView(page);
+        if (phonePreview) {
+            setContentView(new TvAdapter(this, page, dp(960), dp(540)));
+        } else {
+            setContentView(page);
+        }
         return page;
     }
 
