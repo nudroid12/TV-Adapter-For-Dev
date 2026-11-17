@@ -1,0 +1,151 @@
+name: Build Android APK
+
+run-name: Build Android APK from ${{ inputs.branch }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch containing the app, for example tvbrowser
+        required: true
+        type: string
+      project_dir:
+        description: Gradle project folder, blank to detect automatically
+        required: false
+        type: string
+      gradle_task:
+        description: Gradle task, for example :tv:assembleDebug
+        required: false
+        default: assembleDebug
+        type: string
+      java_version:
+        description: Java version
+        required: false
+        default: '17'
+        type: string
+      gradle_version:
+        description: Gradle version to use when the project has no wrapper
+        required: false
+        default: '8.9'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Validate target branch
+        shell: bash
+        env:
+          TARGET_BRANCH: ${{ inputs.branch }}
+        run: git check-ref-format "refs/heads/$TARGET_BRANCH"
+
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/heads/${{ inputs.branch }}
+          persist-credentials: false
+
+      - name: Find Gradle project
+        id: project
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ inputs.project_dir }}
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          import subprocess
+          from pathlib import Path
+
+          root = Path.cwd().resolve()
+          settings = {"settings.gradle", "settings.gradle.kts"}
+
+          def is_project(path):
+              return any((path / name).is_file() for name in settings)
+
+          requested = os.environ["PROJECT_DIR"].strip()
+          if requested:
+              project = (root / requested).resolve()
+              if not project.is_relative_to(root) or not is_project(project):
+                  raise SystemExit("Project folder must be inside the branch and contain Gradle settings.")
+          elif is_project(root):
+              project = root
+          else:
+              files = subprocess.check_output(["git", "ls-files", "-z"]).decode().split("\0")
+              candidates = sorted({Path(name).parent for name in files
+                                   if Path(name).name in settings})
+              if len(candidates) != 1:
+                  folders = ", ".join(str(path) for path in candidates) or "none"
+                  raise SystemExit(f"Specify project_dir. Gradle project folders found: {folders}.")
+              project = (root / candidates[0]).resolve()
+              if not project.is_relative_to(root) or not is_project(project):
+                  raise SystemExit("Detected Gradle project is outside the checkout or missing.")
+
+          relative = project.relative_to(root).as_posix()
+          if "\n" in relative or "\r" in relative:
+              raise SystemExit("Project folder contains a line break.")
+          wrapper = all((project / item).is_file() for item in (
+              "gradlew", "gradle/wrapper/gradle-wrapper.jar",
+              "gradle/wrapper/gradle-wrapper.properties",
+          ))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"directory={relative}", file=output)
+              print(f"wrapper={str(wrapper).lower()}", file=output)
+          print(f"Building Gradle project at {relative}")
+          PYTHON
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version || '17' }}
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: ${{ steps.project.outputs.wrapper == 'true' && 'wrapper' || inputs.gradle_version || '8.9' }}
+          cache-read-only: true
+
+      - name: Build APK
+        working-directory: ${{ steps.project.outputs.directory }}
+        shell: bash
+        env:
+          GRADLE_TASK: ${{ inputs.gradle_task || 'assembleDebug' }}
+          HAS_WRAPPER: ${{ steps.project.outputs.wrapper }}
+        run: |
+          if [[ ! "$GRADLE_TASK" =~ ^(:?[A-Za-z0-9_][A-Za-z0-9_.-]*:)*[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]]; then
+            echo "::error::Enter one Gradle task, such as assembleDebug or :tv:assembleDebug."
+            exit 1
+          fi
+          if [[ "$HAS_WRAPPER" == "true" ]]; then
+            bash ./gradlew --stacktrace "$GRADLE_TASK"
+          else
+            gradle --stacktrace "$GRADLE_TASK"
+          fi
+
+      - name: Collect APK outputs
+        working-directory: ${{ steps.project.outputs.directory }}
+        shell: bash
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          import shutil
+          from pathlib import Path
+
+          destination = Path(os.environ["RUNNER_TEMP"]) / "android-apks"
+          apks = sorted(Path(".").glob("**/build/outputs/apk/**/*.apk"))
+          if not apks:
+              raise SystemExit("No APK found under build/outputs/apk. Use an assemble task.")
+          for apk in apks:
+              output = destination / apk
+              output.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(apk, output)
+              print(apk)
+          PYTHON
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Android-APK
+          path: ${{ runner.temp }}/android-apks/
+          if-no-files-found: error
