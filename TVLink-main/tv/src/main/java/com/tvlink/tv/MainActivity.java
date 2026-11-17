@@ -1,12 +1,15 @@
 package com.tvlink.tv;
 
 import com.nudroidlabs.tvadapter.TvAdapter;
+import com.nudroidlabs.tvadapter.TvPreviewDisplay;
 import com.tvlink.ui.R;
 
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
+import android.content.pm.ApplicationInfo;
+import android.content.res.Resources;
 import android.widget.EditText;
 import android.widget.ScrollView;
 import android.widget.Toast;
@@ -25,19 +28,30 @@ public class MainActivity extends Activity {
     private static final int FOCUS_FILL = Color.WHITE;
     private static final int FOCUS_BLUE = 0xff7fb1fe;
 
-    private boolean phonePreview;
+    private TvPreviewDisplay previewDisplay;
     private boolean showingHome;
     private boolean showingAbout;
+
+    @Override protected void attachBaseContext(android.content.Context base) {
+        super.attachBaseContext(base);
+        if ((base.getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0
+                && !TvAdapter.isTelevision(base)) {
+            previewDisplay = TvPreviewDisplay.fromProfile(base, null);
+        }
+    }
 
     @Override public void onCreate(Bundle state) {
         setTheme(R.style.TVLinkTelevisionTheme);
         super.onCreate(state);
-        phonePreview = !TvAdapter.isTelevision(this);
-        if (phonePreview) {
+        if (previewDisplay != null) {
             setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
         }
         getPreferences(MODE_PRIVATE).registerOnSharedPreferenceChangeListener(deviceListener);
         home();
+    }
+
+    @Override public Resources getResources() {
+        return previewDisplay == null ? super.getResources() : previewDisplay.resources();
     }
 
     private int dp(int size) {
@@ -63,8 +77,8 @@ public class MainActivity extends Activity {
         deviceCard = null;
         storageRoot = null;
         storageFolder = null;
-        if (phonePreview) {
-            setContentView(new TvAdapter(this, page, dp(960), dp(540)));
+        if (previewDisplay != null) {
+            setContentView(new TvAdapter(this, page, previewDisplay));
         } else {
             setContentView(page);
         }

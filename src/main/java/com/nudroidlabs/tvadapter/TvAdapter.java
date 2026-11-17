@@ -48,6 +48,7 @@ public final class TvAdapter extends FrameLayout {
     }
 
     private final Activity activity;
+    private final Context controlContext;
     private final View content;
     private final RemoteState remote;
     private final FrameLayout stage;
@@ -62,11 +63,21 @@ public final class TvAdapter extends FrameLayout {
 
     /** The host supplies the TV content size in pixels. */
     public TvAdapter(Activity activity, View content, int widthPx, int heightPx) {
-        super(activity);
+        this(activity, activity, content, widthPx, heightPx);
+    }
+
+    public TvAdapter(Activity activity, View content, TvPreviewDisplay display) {
+        this(activity, activity.getBaseContext(), content, display.widthPx(), display.heightPx());
+    }
+
+    private TvAdapter(Activity activity, Context controlContext, View content,
+            int widthPx, int heightPx) {
+        super(controlContext);
         if (widthPx <= 0 || heightPx <= 0) {
             throw new IllegalArgumentException("TV content dimensions must be positive.");
         }
         this.activity = activity;
+        this.controlContext = controlContext;
         this.content = content;
         RemoteState saved = REMOTE_STATES.get(activity);
         if (saved == null) {
@@ -81,12 +92,12 @@ public final class TvAdapter extends FrameLayout {
                     insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
             return insets.consumeSystemWindowInsets();
         });
-        stage = new FrameLayout(activity);
+        stage = new FrameLayout(controlContext);
         addView(stage, new LayoutParams(-1, -1));
-        stage.addView(new TvViewport(activity, content, widthPx, heightPx),
+        stage.addView(new TvViewport(controlContext, content, widthPx, heightPx),
                 new LayoutParams(-1, -1));
 
-        touchBlocker = new View(activity);
+        touchBlocker = new View(controlContext);
         touchBlocker.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         touchBlocker.setOnTouchListener((view, event) -> {
             if (event.getActionMasked() == MotionEvent.ACTION_DOWN) restoreFocus();
@@ -150,7 +161,7 @@ public final class TvAdapter extends FrameLayout {
     }
 
     private FrameLayout createPanel() {
-        FrameLayout remotePanel = new FrameLayout(activity);
+        FrameLayout remotePanel = new FrameLayout(controlContext);
         GradientDrawable background = rounded(PANEL_FILL, 18);
         background.setStroke(dp(1), 0xff3a4b68);
         remotePanel.setBackground(background);
@@ -159,7 +170,7 @@ public final class TvAdapter extends FrameLayout {
         touch.setOnClickListener(view -> setTouchMode(true));
         place(remotePanel, touch, 48, 36, 58, 8);
 
-        FrameLayout pad = new FrameLayout(activity);
+        FrameLayout pad = new FrameLayout(controlContext);
         pad.setBackground(rounded(PAD_FILL, 66));
         place(remotePanel, pad, 132, 132, 16, 48);
         addArrow(pad, "up", "Up", KeyEvent.KEYCODE_DPAD_UP, 40, 0, 52, 42);
@@ -195,7 +206,7 @@ public final class TvAdapter extends FrameLayout {
     }
 
     private TextView label(String text, int fill, int radius) {
-        TextView view = new TextView(activity);
+        TextView view = new TextView(controlContext);
         view.setText(text);
         view.setTextSize(15);
         view.setTextColor(Color.WHITE);
@@ -206,7 +217,7 @@ public final class TvAdapter extends FrameLayout {
     }
 
     private View icon(String shape, String description, int fill, int radius) {
-        View view = new RemoteIcon(activity, shape);
+        View view = new RemoteIcon(controlContext, shape);
         view.setContentDescription(description);
         styleControl(view, fill, radius);
         return view;
@@ -231,7 +242,7 @@ public final class TvAdapter extends FrameLayout {
 
     private void installDrag(View handle, boolean resize, boolean tap) {
         // A down/move gesture on blank space drags immediately after touch slop.
-        final int slop = ViewConfiguration.get(activity).getScaledTouchSlop();
+        final int slop = ViewConfiguration.get(controlContext).getScaledTouchSlop();
         handle.setOnTouchListener(new View.OnTouchListener() {
             private float downX, downY, startX, startY, startScale;
             private boolean moved;
