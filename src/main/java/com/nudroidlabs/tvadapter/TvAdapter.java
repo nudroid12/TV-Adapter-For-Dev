@@ -3,60 +3,117 @@ package com.nudroidlabs.tvadapter;
 import android.app.Activity;
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.content.res.Configuration;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
-import android.content.res.ColorStateList;
 import android.os.SystemClock;
+import android.view.FocusFinder;
 import android.view.Gravity;
 import android.view.InputDevice;
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
-import android.view.ViewGroup;
 import android.view.View;
-import android.widget.Button;
-import android.widget.EditText;
+import android.view.ViewConfiguration;
+import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.widget.FrameLayout;
-import android.widget.LinearLayout;
+import android.widget.TextView;
 
-/** Fits an existing Android View hierarchy and sends D-pad input to its activity. */
+import java.util.ArrayList;
+import java.util.WeakHashMap;
+
+/** Fits an existing TV layout and adds local remote and touch controls. */
 public final class TvAdapter extends FrameLayout {
-    private static final float MIN_REMOTE_SCALE = 0.85f;
-    private static final float DEFAULT_REMOTE_SCALE = 1.2f;
-    private static final float MAX_REMOTE_SCALE = 2f;
+    private static final float MIN_SCALE = 0.75f;
+    private static final float MAX_SCALE = 1.65f;
+    private static final int PANEL_FILL = 0xf5192439;
+    private static final int BUTTON_FILL = 0xff293853;
+    private static final int PAD_FILL = 0xff202e48;
+    private static final int NO_POSITION = -1;
+
+    // A host can create a new adapter per screen. Keep only the remote's settings.
+    private static final WeakHashMap<Activity, RemoteState> REMOTE_STATES = new WeakHashMap<>();
+
+    private static final class RemoteState {
+        boolean touchMode;
+        float xFraction = NO_POSITION;
+        float yFraction = NO_POSITION;
+        float scale = 1f;
+    }
 
     private final Activity activity;
+    private final View content;
+    private final RemoteState remote;
+    private final FrameLayout stage;
+    private final View touchBlocker;
+    private final FrameLayout panel;
+    private final View collapsed;
     private View lastContentFocus;
+    private final ViewTreeObserver.OnGlobalFocusChangeListener focusListener =
+            (oldFocus, newFocus) -> {
+                if (belongsToContent(newFocus)) lastContentFocus = newFocus;
+            };
 
-    /** The host supplies the existing TV content size in pixels. */
+    /** The host supplies the TV content size in pixels. */
     public TvAdapter(Activity activity, View content, int widthPx, int heightPx) {
         super(activity);
         if (widthPx <= 0 || heightPx <= 0) {
             throw new IllegalArgumentException("TV content dimensions must be positive.");
         }
         this.activity = activity;
+        this.content = content;
+        RemoteState saved = REMOTE_STATES.get(activity);
+        if (saved == null) {
+            saved = new RemoteState();
+            REMOTE_STATES.put(activity, saved);
+        }
+        remote = saved;
+
         setBackgroundColor(Color.BLACK);
         setOnApplyWindowInsetsListener((view, insets) -> {
             setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
                     insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
             return insets.consumeSystemWindowInsets();
         });
+        stage = new FrameLayout(activity);
+        addView(stage, new LayoutParams(-1, -1));
+        stage.addView(new TvViewport(activity, content, widthPx, heightPx),
+                new LayoutParams(-1, -1));
 
-        FrameLayout stage = new FrameLayout(activity);
-        addView(stage, new FrameLayout.LayoutParams(-1, -1));
-        stage.addView(new TvViewport(activity, content, widthPx, heightPx), new FrameLayout.LayoutParams(-1, -1));
-        stage.getViewTreeObserver().addOnGlobalFocusChangeListener((oldFocus, newFocus) -> {
-            for (View view = newFocus; view != null; ) {
-                if (view == content) {
-                    lastContentFocus = newFocus;
-                    break;
-                }
-                view = view.getParent() instanceof View ? (View) view.getParent() : null;
-            }
+        touchBlocker = new View(activity);
+        touchBlocker.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        touchBlocker.setOnTouchListener((view, event) -> {
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) restoreFocus();
+            return true;
         });
-        addRemote(stage, content);
+        stage.addView(touchBlocker, new LayoutParams(-1, -1));
+
+        panel = createPanel();
+        panel.setElevation(dp(8));
+        panel.setPivotX(0);
+        panel.setPivotY(0);
+        stage.addView(panel, new LayoutParams(dp(164), dp(222), Gravity.TOP | Gravity.LEFT));
+        installDrag(panel, false, false);
+
+        collapsed = icon("remote", "Switch to D-pad mode", BUTTON_FILL, 14);
+        collapsed.setElevation(dp(8));
+        collapsed.setOnClickListener(view -> setTouchMode(false));
+        stage.addView(collapsed, new LayoutParams(dp(46), dp(46), Gravity.TOP | Gravity.LEFT));
+        installDrag(collapsed, false, true);
+
+        stage.addOnLayoutChangeListener((view, l, t, r, b, oldL, oldT, oldR, oldB) ->
+                positionRemote());
+        panel.addOnLayoutChangeListener((view, l, t, r, b, oldL, oldT, oldR, oldB) ->
+                positionRemote());
+        collapsed.addOnLayoutChangeListener((view, l, t, r, b, oldL, oldT, oldR, oldB) ->
+                positionRemote());
+        setTouchMode(remote.touchMode);
     }
 
     public static boolean isTelevision(Context context) {
@@ -67,135 +124,98 @@ public final class TvAdapter extends FrameLayout {
                 || packages.hasSystemFeature(PackageManager.FEATURE_TELEVISION);
     }
 
-    private void addRemote(FrameLayout stage, View content) {
-        LinearLayout panel = new LinearLayout(activity);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(6), dp(4), dp(6), dp(6));
-        panel.setBackground(rounded(0xf223272e, 13));
-        panel.setElevation(dp(8));
-        panel.setClickable(true);
-
-        LinearLayout header = new LinearLayout(activity);
-        Button grip = remoteButton("⠿", "Drag remote");
-        header.addView(grip, new LinearLayout.LayoutParams(0, dp(32), 1f));
-        Button close = remoteButton("×", "Close preview");
-        header.addView(close, new LinearLayout.LayoutParams(dp(34), dp(32)));
-        close.setOnClickListener(v -> activity.finish());
-        panel.addView(header);
-
-        LinearLayout up = addRemoteRow(panel);
-        addSpacer(up);
-        addRemoteKey(up, content, "↑", "Up", KeyEvent.KEYCODE_DPAD_UP);
-        addSpacer(up);
-
-        LinearLayout middle = addRemoteRow(panel);
-        addRemoteKey(middle, content, "←", "Left", KeyEvent.KEYCODE_DPAD_LEFT);
-        addRemoteKey(middle, content, "OK", "OK", KeyEvent.KEYCODE_DPAD_CENTER);
-        addRemoteKey(middle, content, "→", "Right", KeyEvent.KEYCODE_DPAD_RIGHT);
-
-        LinearLayout bottom = addRemoteRow(panel);
-        addSpacer(bottom);
-        addRemoteKey(bottom, content, "↓", "Down", KeyEvent.KEYCODE_DPAD_DOWN);
-        addSpacer(bottom);
-
-        LinearLayout footer = addRemoteRow(panel);
-        addRemoteKey(footer, content, "Back", "Back", KeyEvent.KEYCODE_BACK);
-        Button resize = remoteButton("↘", "Drag to resize remote");
-        LinearLayout.LayoutParams resizeParams = new LinearLayout.LayoutParams(dp(34), -1);
-        resizeParams.setMargins(dp(2), dp(2), dp(2), dp(2));
-        footer.addView(resize, resizeParams);
-
-        panel.setPivotX(0);
-        panel.setPivotY(0);
-        panel.setVisibility(View.INVISIBLE);
-        stage.addView(panel, new FrameLayout.LayoutParams(dp(144),
-                ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.LEFT));
-        installRemoteGesture(stage, panel, grip, false);
-        installRemoteGesture(stage, panel, resize, true);
-        stage.addOnLayoutChangeListener((view, left, top, right, stageBottom, oldLeft, oldTop,
-                oldRight, oldBottom) -> {
-            boolean firstLayout = panel.getVisibility() == View.INVISIBLE;
-            float x = firstLayout ? stage.getWidth() - panel.getWidth()
-                    * DEFAULT_REMOTE_SCALE - dp(16) : panel.getX();
-            float y = firstLayout ? stage.getHeight() - panel.getHeight()
-                    * DEFAULT_REMOTE_SCALE - dp(16) : panel.getY();
-            placeRemote(stage, panel, x, y,
-                    firstLayout ? DEFAULT_REMOTE_SCALE : panel.getScaleX());
-            panel.setVisibility(View.VISIBLE);
-        });
+    @Override protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        getViewTreeObserver().addOnGlobalFocusChangeListener(focusListener);
+        if (!remote.touchMode) post(this::ensureDpadFocus);
     }
 
-    private void installRemoteGesture(FrameLayout stage, View panel, Button handle,
-            boolean resize) {
-        handle.setOnTouchListener(new View.OnTouchListener() {
-            private float touchX;
-            private float touchY;
-            private float startX;
-            private float startY;
-            private float startScale;
-            private boolean active;
-
-            @Override
-            public boolean onTouch(View view, MotionEvent event) {
-                switch (event.getActionMasked()) {
-                    case MotionEvent.ACTION_DOWN:
-                        touchX = event.getRawX();
-                        touchY = event.getRawY();
-                        startX = panel.getX();
-                        startY = panel.getY();
-                        startScale = panel.getScaleX();
-                        active = true;
-                        handle.setPressed(true);
-                        return true;
-                    case MotionEvent.ACTION_MOVE:
-                        if (!active) return true;
-                        float dx = event.getRawX() - touchX;
-                        float dy = event.getRawY() - touchY;
-                        if (resize) {
-                            float width = panel.getWidth();
-                            float height = panel.getHeight();
-                            // Project the drag onto the corner diagonal to scale both axes evenly.
-                            float delta = (width * dx + height * dy)
-                                    / (width * width + height * height);
-                            placeRemote(stage, panel, startX, startY, startScale + delta);
-                        } else {
-                            placeRemote(stage, panel, startX + dx, startY + dy, startScale);
-                        }
-                        return true;
-                    case MotionEvent.ACTION_POINTER_DOWN:
-                    case MotionEvent.ACTION_UP:
-                    case MotionEvent.ACTION_CANCEL:
-                        active = false;
-                        handle.setPressed(false);
-                        return true;
-                    default:
-                        return true;
-                }
-            }
-        });
+    @Override protected void onDetachedFromWindow() {
+        getViewTreeObserver().removeOnGlobalFocusChangeListener(focusListener);
+        super.onDetachedFromWindow();
     }
 
-    private void placeRemote(FrameLayout stage, View panel, float x, float y, float scale) {
-        if (panel.getWidth() == 0 || panel.getHeight() == 0
-                || stage.getWidth() == 0 || stage.getHeight() == 0) return;
-
-        float fit = Math.min(stage.getWidth() / (float) panel.getWidth(),
-                stage.getHeight() / (float) panel.getHeight());
-        scale = Math.min(fit, Math.min(MAX_REMOTE_SCALE, Math.max(MIN_REMOTE_SCALE, scale)));
-        panel.setScaleX(scale);
-        panel.setScaleY(scale);
-        panel.setX(Math.max(0, Math.min(x, stage.getWidth() - panel.getWidth() * scale)));
-        panel.setY(Math.max(0, Math.min(y, stage.getHeight() - panel.getHeight() * scale)));
+    private void setTouchMode(boolean enabled) {
+        remote.touchMode = enabled;
+        touchBlocker.setVisibility(enabled ? View.GONE : View.VISIBLE);
+        // INVISIBLE keeps both controls measured, so the icon can share the panel's anchor.
+        panel.setVisibility(enabled ? View.INVISIBLE : View.VISIBLE);
+        collapsed.setVisibility(enabled ? View.VISIBLE : View.INVISIBLE);
+        positionRemote();
+        if (!enabled) ensureDpadFocus();
     }
 
-    private LinearLayout addRemoteRow(LinearLayout panel) {
-        LinearLayout row = new LinearLayout(activity);
-        panel.addView(row, new LinearLayout.LayoutParams(-1, dp(40)));
-        return row;
+    private void ensureDpadFocus() {
+        if (!remote.touchMode && isAttachedToWindow()) restoreFocus();
     }
 
-    private void addSpacer(LinearLayout row) {
-        row.addView(new View(activity), new LinearLayout.LayoutParams(0, 1, 1f));
+    private FrameLayout createPanel() {
+        FrameLayout remotePanel = new FrameLayout(activity);
+        GradientDrawable background = rounded(PANEL_FILL, 18);
+        background.setStroke(dp(1), 0xff3a4b68);
+        remotePanel.setBackground(background);
+
+        View touch = icon("touch", "Switch to Touch mode", BUTTON_FILL, 16);
+        touch.setOnClickListener(view -> setTouchMode(true));
+        place(remotePanel, touch, 48, 36, 58, 8);
+
+        FrameLayout pad = new FrameLayout(activity);
+        pad.setBackground(rounded(PAD_FILL, 66));
+        place(remotePanel, pad, 132, 132, 16, 48);
+        addArrow(pad, "up", "Up", KeyEvent.KEYCODE_DPAD_UP, 40, 0, 52, 42);
+        addArrow(pad, "left", "Left", KeyEvent.KEYCODE_DPAD_LEFT, 0, 40, 42, 52);
+        addArrow(pad, "right", "Right", KeyEvent.KEYCODE_DPAD_RIGHT, 90, 40, 42, 52);
+        addArrow(pad, "down", "Down", KeyEvent.KEYCODE_DPAD_DOWN, 40, 90, 52, 42);
+        TextView ok = label("OK", 0xff131d31, 25);
+        ok.setOnClickListener(view -> sendRemoteKey(KeyEvent.KEYCODE_DPAD_CENTER));
+        place(pad, ok, 48, 48, 42, 42);
+
+        TextView back = label("Back", BUTTON_FILL, 14);
+        back.setOnClickListener(view -> sendRemoteKey(KeyEvent.KEYCODE_BACK));
+        place(remotePanel, back, 101, 34, 8, 181);
+
+        View resize = icon("resize", "Drag to resize remote", BUTTON_FILL, 11);
+        place(remotePanel, resize, 39, 34, 117, 181);
+        installDrag(resize, true, false);
+        return remotePanel;
+    }
+
+    private void place(FrameLayout parent, View view, int width, int height, int x, int y) {
+        LayoutParams params = new LayoutParams(dp(width), dp(height), Gravity.TOP | Gravity.LEFT);
+        params.leftMargin = dp(x);
+        params.topMargin = dp(y);
+        parent.addView(view, params);
+    }
+
+    private void addArrow(FrameLayout pad, String shape, String description,
+            int key, int x, int y, int width, int height) {
+        View control = icon(shape, description, Color.TRANSPARENT, 19);
+        control.setOnClickListener(view -> sendRemoteKey(key));
+        place(pad, control, width, height, x, y);
+    }
+
+    private TextView label(String text, int fill, int radius) {
+        TextView view = new TextView(activity);
+        view.setText(text);
+        view.setTextSize(15);
+        view.setTextColor(Color.WHITE);
+        view.setGravity(Gravity.CENTER);
+        view.setIncludeFontPadding(false);
+        styleControl(view, fill, radius);
+        return view;
+    }
+
+    private View icon(String shape, String description, int fill, int radius) {
+        View view = new RemoteIcon(activity, shape);
+        view.setContentDescription(description);
+        styleControl(view, fill, radius);
+        return view;
+    }
+
+    private void styleControl(View view, int fill, int radius) {
+        view.setFocusable(false);
+        view.setBackground(new RippleDrawable(ColorStateList.valueOf(0x44ffffff),
+                rounded(fill, radius), rounded(Color.WHITE, radius)));
     }
 
     private GradientDrawable rounded(int color, int radius) {
@@ -206,76 +226,203 @@ public final class TvAdapter extends FrameLayout {
     }
 
     private int dp(int value) {
-        return Math.round(value * activity.getResources().getDisplayMetrics().density);
+        return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
-    private Button remoteButton(String label, String description) {
-        Button button = new Button(activity);
-        button.setText(label);
-        button.setAllCaps(false);
-        button.setTextColor(Color.WHITE);
-        button.setTextSize(14);
-        button.setContentDescription(description);
-        button.setFocusable(false);
-        button.setMinWidth(0);
-        button.setMinimumWidth(0);
-        button.setMinHeight(0);
-        button.setMinimumHeight(0);
-        button.setPadding(0, 0, 0, 0);
-        button.setBackground(new RippleDrawable(ColorStateList.valueOf(0x55ffffff),
-                rounded(0xff363e49, 7), null));
-        return button;
+    private void installDrag(View handle, boolean resize, boolean tap) {
+        // A down/move gesture on blank space drags immediately after touch slop.
+        final int slop = ViewConfiguration.get(activity).getScaledTouchSlop();
+        handle.setOnTouchListener(new View.OnTouchListener() {
+            private float downX, downY, startX, startY, startScale;
+            private boolean moved;
+
+            @Override public boolean onTouch(View view, MotionEvent event) {
+                View control = remote.touchMode ? collapsed : panel;
+                switch (event.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        ensureDpadFocus();
+                        downX = event.getRawX();
+                        downY = event.getRawY();
+                        startX = control.getX();
+                        startY = control.getY();
+                        startScale = control.getScaleX();
+                        moved = false;
+                        view.setPressed(true);
+                        return true;
+                    case MotionEvent.ACTION_MOVE:
+                        float dx = event.getRawX() - downX;
+                        float dy = event.getRawY() - downY;
+                        if (!moved && Math.hypot(dx, dy) <= slop) return true;
+                        moved = true;
+                        if (resize) {
+                            float width = panel.getWidth();
+                            float height = panel.getHeight();
+                            float delta = (width * dx + height * dy) / (width * width + height * height);
+                            remote.scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, startScale + delta));
+                            moveRemote(control, startX, startY, panelScale());
+                        } else {
+                            moveRemote(control, startX + dx, startY + dy, startScale);
+                        }
+                        return true;
+                    case MotionEvent.ACTION_UP:
+                        view.setPressed(false);
+                        if (tap && !moved) view.performClick();
+                        return true;
+                    case MotionEvent.ACTION_CANCEL:
+                        view.setPressed(false);
+                        return true;
+                    default:
+                        return true;
+                }
+            }
+        });
+        // View's OnTouchListener requires a clickable control to own the gesture.
+        handle.setClickable(true);
     }
 
-    private void addRemoteKey(LinearLayout row, View content, String label,
-            String description, int code) {
-        Button button = remoteButton(label, description);
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -1, 1f);
-        params.setMargins(dp(2), dp(2), dp(2), dp(2));
-        row.addView(button, params);
-        button.setOnClickListener(view -> sendRemoteKey(content, code));
+    private float panelScale() {
+        if (panel.getWidth() == 0 || panel.getHeight() == 0) return remote.scale;
+        return Math.min(remote.scale, Math.min(stage.getWidth() / (float) panel.getWidth(),
+                stage.getHeight() / (float) panel.getHeight()));
     }
 
-    private void sendRemoteKey(View content, int code) {
-        if (code == KeyEvent.KEYCODE_BACK) {
-            activity.onBackPressed();
-            return;
+    private void positionRemote() {
+        if (stage.getWidth() == 0 || stage.getHeight() == 0) return;
+        // Both presentations use the same proportional position so switching modes
+        // preserves the expanded panel's location and size.
+        placeAtSavedPosition(panel, panelScale());
+        placeAtSavedPosition(collapsed, 1f);
+    }
+
+    private void placeAtSavedPosition(View control, float scale) {
+        control.setScaleX(scale);
+        control.setScaleY(scale);
+        float maxX = Math.max(0f, stage.getWidth() - control.getWidth() * scale);
+        float maxY = Math.max(0f, stage.getHeight() - control.getHeight() * scale);
+        control.setX(remote.xFraction == NO_POSITION ? Math.max(0f, maxX - dp(14))
+                : maxX * remote.xFraction);
+        control.setY(remote.yFraction == NO_POSITION ? Math.max(0f, maxY - dp(14))
+                : maxY * remote.yFraction);
+    }
+
+    private void moveRemote(View control, float x, float y, float scale) {
+        float maxX = stage.getWidth() - control.getWidth() * scale;
+        float maxY = stage.getHeight() - control.getHeight() * scale;
+        if (maxX > 0f) remote.xFraction = Math.max(0f, Math.min(1f, x / maxX));
+        if (maxY > 0f) remote.yFraction = Math.max(0f, Math.min(1f, y / maxY));
+        positionRemote();
+    }
+
+    private boolean belongsToContent(View view) {
+        for (View current = view; current != null;
+                current = current.getParent() instanceof View ? (View) current.getParent() : null) {
+            if (current == content) return true;
         }
+        return false;
+    }
 
+    private View restoreFocus() {
         View focused = content.findFocus();
-        if (focused == null) focused = lastContentFocus;
-        if (focused == null) focused = content.focusSearch(View.FOCUS_FORWARD);
-        if (focused != null) focused.requestFocusFromTouch();
+        if (focused != null && !isInTouchMode()) return focused;
 
-        // D-pad navigation can leave a text field when a focus target exists.
-        if (activity.getCurrentFocus() instanceof EditText &&
-                (code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_DPAD_RIGHT) &&
-                moveFocus(code)) {
-            return;
+        // Tapping on the overlay can put the window back into touch mode and clear
+        // TV-only focus. Restore it before dispatching the emulated hardware key.
+        View previous = focused == null ? lastContentFocus : focused;
+        if (belongsToContent(previous) && previous.isShown() && previous.isEnabled()
+                && previous.requestFocusFromTouch()) {
+            return previous;
         }
 
-        long now = SystemClock.uptimeMillis();
-        boolean handled = activity.dispatchKeyEvent(new KeyEvent(now, now, KeyEvent.ACTION_DOWN,
-                code, 0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_DPAD));
-        if (!handled) moveFocus(code);
-        activity.dispatchKeyEvent(new KeyEvent(now, now, KeyEvent.ACTION_UP, code, 0, 0,
-                KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_DPAD));
+        ArrayList<View> candidates = new ArrayList<>();
+        content.addFocusables(candidates, View.FOCUS_FORWARD, View.FOCUSABLES_ALL);
+        for (View candidate : candidates) {
+            if (candidate.isEnabled() && candidate.requestFocusFromTouch()) return candidate;
+        }
+        return null;
     }
 
-    private boolean moveFocus(int code) {
+    private void sendRemoteKey(int keyCode) {
+        View focused = keyCode == KeyEvent.KEYCODE_BACK ? null : restoreFocus();
+        long now = SystemClock.uptimeMillis();
+        boolean downHandled = activity.dispatchKeyEvent(key(now, KeyEvent.ACTION_DOWN, keyCode));
+        boolean upHandled = activity.dispatchKeyEvent(key(now, KeyEvent.ACTION_UP, keyCode));
+        if (downHandled || upHandled || focused == null || content.findFocus() != focused) return;
+
+        if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER) {
+            if (focused.isEnabled() && focused.isClickable()) focused.performClick();
+            return;
+        }
         int direction;
-        switch (code) {
-            case KeyEvent.KEYCODE_DPAD_LEFT: direction = View.FOCUS_LEFT; break;
-            case KeyEvent.KEYCODE_DPAD_RIGHT: direction = View.FOCUS_RIGHT; break;
+        switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_UP: direction = View.FOCUS_UP; break;
             case KeyEvent.KEYCODE_DPAD_DOWN: direction = View.FOCUS_DOWN; break;
-            default: return false;
+            case KeyEvent.KEYCODE_DPAD_LEFT: direction = View.FOCUS_LEFT; break;
+            case KeyEvent.KEYCODE_DPAD_RIGHT: direction = View.FOCUS_RIGHT; break;
+            default: return;
         }
-        View focused = activity.getCurrentFocus();
-        if (focused == null) return false;
+        if (content instanceof ViewGroup) {
+            View next = FocusFinder.getInstance().findNextFocus((ViewGroup) content, focused, direction);
+            if (next != null) next.requestFocus(direction);
+        }
+    }
 
-        View next = focused.focusSearch(direction);
-        return next != null && next.requestFocus(direction);
+    private KeyEvent key(long time, int action, int code) {
+        return new KeyEvent(time, time, action, code, 0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD,
+                0, 0, InputDevice.SOURCE_DPAD);
+    }
+
+    private static final class RemoteIcon extends View {
+        private final String shape;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path path = new Path();
+
+        RemoteIcon(Context context, String shape) {
+            super(context);
+            this.shape = shape;
+            paint.setColor(Color.WHITE);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(1.8f);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeJoin(Paint.Join.ROUND);
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float size = Math.min(getWidth(), getHeight()) * 0.65f;
+            canvas.save();
+            canvas.translate((getWidth() - size) / 2f, (getHeight() - size) / 2f);
+            canvas.scale(size / 24f, size / 24f);
+            switch (shape) {
+                case "up": line(canvas, 6, 15, 12, 9, 18, 15); break;
+                case "down": line(canvas, 6, 9, 12, 15, 18, 9); break;
+                case "left": line(canvas, 15, 6, 9, 12, 15, 18); break;
+                case "right": line(canvas, 9, 6, 15, 12, 9, 18); break;
+                case "resize":
+                    canvas.drawLine(7, 7, 17, 17, paint);
+                    line(canvas, 11, 17, 17, 17, 17, 11);
+                    break;
+                case "remote":
+                    canvas.drawRoundRect(6, 2, 18, 22, 3, 3, paint);
+                    canvas.drawCircle(12, 8, 2.5f, paint);
+                    canvas.drawLine(9, 15, 15, 15, paint);
+                    canvas.drawLine(9, 18, 15, 18, paint);
+                    break;
+                case "touch":
+                    canvas.drawArc(7, 2, 16, 11, 165, 207, false, paint);
+                    line(canvas, 10, 17, 10, 7, 12, 5, 14, 7, 14, 13,
+                            16, 11, 20, 13, 20, 18, 18, 22, 12, 22, 6, 16, 7, 14, 10, 17);
+                    break;
+                default: break;
+            }
+            canvas.restore();
+        }
+
+        private void line(Canvas canvas, float... points) {
+            path.reset();
+            path.moveTo(points[0], points[1]);
+            for (int i = 2; i < points.length; i += 2) path.lineTo(points[i], points[i + 1]);
+            canvas.drawPath(path, paint);
+        }
     }
 
     private static final class TvViewport extends FrameLayout {
