@@ -10,7 +10,10 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -55,6 +58,9 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.nudroidlabs.tvadapter.TvAdapter;
+import com.nudroidlabs.tvadapter.TvPreviewDisplay;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -82,6 +88,7 @@ public class MainActivity extends Activity {
     private static final int REQUEST_WRITE_STORAGE = 130;
     private static final long OK_DOUBLE_TAP_MS = 330L;
 
+    private TvPreviewDisplay previewDisplay;
     private WebView webView;
     private EditText addressBar;
     private ProgressBar progressBar;
@@ -130,6 +137,11 @@ public class MainActivity extends Activity {
     private String pendingDownloadDisposition;
     private String pendingDownloadMime;
 
+    @Override
+    public Resources getResources() {
+        return previewDisplay == null ? super.getResources() : previewDisplay.resources();
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -144,6 +156,13 @@ public class MainActivity extends Activity {
             return;
         }
 
+        Context host = getBaseContext();
+        if ((host.getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0
+                && !TvAdapter.isTelevision(host)) {
+            previewDisplay = TvPreviewDisplay.fromProfile(host, null);
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+        }
+
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         loadSettings();
         adBlocker = new AdBlocker(this);
@@ -151,12 +170,18 @@ public class MainActivity extends Activity {
 
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.rgb(17, 19, 21));
-        setContentView(root);
+        if (previewDisplay != null) {
+            setContentView(new TvAdapter(this, root, previewDisplay));
+        } else {
+            setContentView(root);
+        }
 
         pageContainer = new LinearLayout(this);
         pageContainer.setOrientation(LinearLayout.VERTICAL);
         root.addView(pageContainer, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        installSafeAreaInsets();
+        if (previewDisplay == null) {
+            installSafeAreaInsets();
+        }
 
         LinearLayout toolbar = new LinearLayout(this);
         toolbar.setOrientation(LinearLayout.HORIZONTAL);
