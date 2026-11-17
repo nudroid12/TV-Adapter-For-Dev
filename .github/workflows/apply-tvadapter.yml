@@ -1,23 +1,21 @@
-name: TV Adapter Apply ZIP
+name: Apply ZIP patches
+
 on:
-  push:
-    branches: ['**']
-    paths:
-      - '*.[zZ][iI][pP]'
-      - '.github/workflows/apply-tvadapter.yml'
-  workflow_dispatch:
+  workflow_call:
+    outputs:
+      source_sha:
+        description: Branch commit after applying patches
+        value: ${{ jobs.apply.outputs.source_sha }}
 
 permissions:
   contents: write
-
-concurrency:
-  group: tvadapter-apply-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
   apply:
     if: github.ref_type == 'branch'
     runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.result.outputs.sha }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -92,3 +90,7 @@ jobs:
               -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
               commit -m 'Apply ZIP patches'
           git push origin "HEAD:$GITHUB_REF"
+      - name: Record source commit
+        id: result
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
