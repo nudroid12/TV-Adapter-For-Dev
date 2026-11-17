@@ -1,0 +1,77 @@
+name: Build TVLink Adapter APK
+
+on:
+  push:
+    branches: [tvlink]
+    paths:
+      - '.github/workflows/build-tvlink-adapter.yml'
+      - 'TVLink-main/**'
+      - 'src/main/java/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-tvlink-adapter
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Verify the adapter patch was applied
+        shell: bash
+        run: |
+          if ! grep -Fq 'new TvAdapter(' TVLink-main/tv/src/main/java/com/tvlink/tv/MainActivity.java; then
+            echo '::error::Apply the TVLink adapter ZIP on branch tvlink before committing this workflow.'
+            exit 1
+          fi
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.9'
+
+      - name: Ensure Android SDK packages are available
+        shell: bash
+        run: |
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:?Android SDK unavailable}}"
+          missing=()
+          [[ -s "$sdk/platforms/android-35/android.jar" ]] || missing+=('platforms;android-35')
+          [[ -x "$sdk/build-tools/34.0.0/aapt2" ]] || missing+=('build-tools;34.0.0')
+          if (( ${#missing[@]} == 0 )); then
+            exit 0
+          fi
+          sdkmanager_bin="$(command -v sdkmanager || true)"
+          if [[ -z "$sdkmanager_bin" ]]; then
+            for candidate in "$sdk/cmdline-tools/latest/bin/sdkmanager" "$sdk"/cmdline-tools/*/bin/sdkmanager; do
+              if [[ -x "$candidate" ]]; then
+                sdkmanager_bin="$candidate"
+                break
+              fi
+            done
+          fi
+          if [[ -z "$sdkmanager_bin" ]]; then
+            echo '::error::Android SDK packages are missing and sdkmanager could not be found.'
+            exit 1
+          fi
+          "$sdkmanager_bin" --sdk_root="$sdk" --install "${missing[@]}"
+
+      - name: Build TVLink for phone testing
+        working-directory: TVLink-main
+        run: gradle :tv:assembleDebug --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TVLink-Adapter-Test-APK
+          path: TVLink-main/tv/build/outputs/apk/debug/tv-debug.apk
+          if-no-files-found: error
