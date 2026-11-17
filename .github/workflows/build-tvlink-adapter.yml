@@ -1,34 +1,41 @@
-name: Build TVLink Adapter APK
+name: Apply and build TVLink Adapter APK
 
 on:
   push:
     branches: [tvlink]
     paths:
+      - '*.[zZ][iI][pP]'
+      - '.github/workflows/apply-tvadapter.yml'
       - '.github/workflows/build-tvlink-adapter.yml'
-      - 'TVLink-main/**'
-      - 'src/main/java/**'
 
 permissions:
   contents: read
 
 concurrency:
-  group: build-tvlink-adapter
-  cancel-in-progress: true
+  group: tvlink-adapter-pipeline-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  apply:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/apply-tvadapter.yml
+
   build:
+    needs: apply
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+          ref: ${{ needs.apply.outputs.source_sha }}
 
       - name: Verify the adapter patch was applied
         shell: bash
         run: |
           if ! grep -Fq 'new TvAdapter(' TVLink-main/tv/src/main/java/com/tvlink/tv/MainActivity.java; then
-            echo '::error::Apply the TVLink adapter ZIP on branch tvlink before committing this workflow.'
+            echo '::error::Apply the TVLink adapter integration ZIP on branch tvlink first.'
             exit 1
           fi
 
